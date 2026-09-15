@@ -4,7 +4,7 @@ import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
@@ -35,17 +35,17 @@ if not verificar_acceso():
     st.stop()
 
 # --- APLICACIÓN PRINCIPAL ---
-st.title("⚽ Asistente Oficial de Normativa y Reglas de Juego")
+st.title("⚽ Asistente Oficial de Normativa y Reglas de Juego (Google Gemini)")
 st.markdown("Consulta cualquier jugada técnica o disciplinaria basada en los documentos oficiales cargados.")
 
-api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 
 if not api_key:
-    st.error("No se encontró la OPENAI_API_KEY configurada en los Secrets del servidor.")
+    st.error("No se encontró la GEMINI_API_KEY en los Secrets de Streamlit.")
     st.stop()
 
 # Carga e indexación
-@st.cache_resource(show_spinner="Procesando e indexando la documentación oficial...")
+@st.cache_resource(show_spinner="Procesando e indexando la documentación con Google Embeddings...")
 def cargar_vectorstore_multiples_pdfs(carpeta_docs: str):
     archivos_pdf = glob.glob(os.path.join(carpeta_docs, "*.pdf"))
     
@@ -67,7 +67,11 @@ def cargar_vectorstore_multiples_pdfs(carpeta_docs: str):
     )
     docs_divididos = splitter.split_documents(todos_los_documentos)
     
-    embeddings = OpenAIEmbeddings(openai_api_key=api_key, model="text-embedding-3-small")
+    # Embeddings oficiales de Google
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/text-embedding-004", 
+        google_api_key=api_key
+    )
     vectorstore = FAISS.from_documents(docs_divididos, embeddings)
     nombres_archivos = [os.path.basename(f) for f in archivos_pdf]
     return vectorstore, nombres_archivos
@@ -88,7 +92,7 @@ with st.sidebar:
         st.session_state["autenticado"] = False
         st.rerun()
 
-# Configuración del prompt arbitral
+# Configuración del prompt
 system_prompt = (
     "Eres un instructor arbitral experto y riguroso. Tu labor es responder a la duda "
     "basándote exclusivamente en los fragmentos de la normativa y reglamentos oficiales proporcionados.\n\n"
@@ -105,7 +109,11 @@ prompt = ChatPromptTemplate.from_messages([
     ("human", "{question}")
 ])
 
-llm = ChatOpenAI(openai_api_key=api_key, model="gpt-4o-mini", temperature=0.0)
+llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    google_api_key=api_key,
+    temperature=0.0
+)
 retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 
 def formatear_documentos(docs):
@@ -114,7 +122,6 @@ def formatear_documentos(docs):
         for doc in docs
     )
 
-# Cadena RAG estándar LCEL (sin paquetes obsoletos)
 cadena_rag = (
     {"context": retriever | formatear_documentos, "question": RunnablePassthrough()}
     | prompt
@@ -122,7 +129,6 @@ cadena_rag = (
     | StrOutputParser()
 )
 
-# Historial de mensajes
 if "mensajes" not in st.session_state:
     st.session_state.mensajes = []
 
@@ -130,7 +136,6 @@ for msg in st.session_state.mensajes:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Consulta
 pregunta = st.chat_input("Plantea aquí una jugada o duda reglamentaria...")
 
 if pregunta:
@@ -140,11 +145,8 @@ if pregunta:
         
     with st.chat_message("assistant"):
         with st.spinner("Analizando la jugada en la normativa..."):
-            # Obtenemos los fragmentos para mostrarlos en el desplegable
             docs_relevantes = retriever.invoke(pregunta)
-            # Generamos la respuesta con la cadena LCEL
             texto_respuesta = cadena_rag.invoke(pregunta)
-            
             st.markdown(texto_respuesta)
             
             with st.expander("Ver fragmentos consultados en los PDFs"):
