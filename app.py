@@ -11,7 +11,7 @@ from langchain_core.runnables import RunnablePassthrough
 
 st.set_page_config(page_title="Asistente Reglamentario", page_icon="⚽", layout="wide")
 
-# --- CONTROL DE ACCESO CON CONTRASEÑA ---
+# Control de acceso
 def verificar_acceso():
     if st.session_state.get("autenticado", False):
         return True
@@ -34,21 +34,19 @@ def verificar_acceso():
 if not verificar_acceso():
     st.stop()
 
-# --- APLICACIÓN PRINCIPAL ---
+# Interfaz
 st.title("⚽ Asistente Oficial de Normativa y Reglas de Juego (Google Gemini)")
 st.markdown("Consulta cualquier jugada técnica o disciplinaria basada en los documentos oficiales cargados.")
 
-# 1. Obtener la API key de Google
 api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 if not api_key:
     st.error("No se encontró la GOOGLE_API_KEY configurada en los Secrets de Streamlit.")
     st.stop()
 
-# Inyectarla en las variables de entorno del sistema
 os.environ["GOOGLE_API_KEY"] = api_key
 
-# 2. Carga e indexación de PDFs con embeddings de Google
+# Carga e indexación
 @st.cache_resource(show_spinner="Procesando e indexando la documentación con Google Embeddings...")
 def cargar_vectorstore_multiples_pdfs(carpeta_docs: str):
     archivos_pdf = glob.glob(os.path.join(carpeta_docs, "*.pdf"))
@@ -71,10 +69,14 @@ def cargar_vectorstore_multiples_pdfs(carpeta_docs: str):
     )
     docs_divididos = splitter.split_documents(todos_los_documentos)
     
-    # Modelo universal compatible de Google para embeddings
+    # NOTA: embedding-001 y text-embedding-004 fueron retirados por Google
+    # el 14/01/2026. El modelo vigente es gemini-embedding-001.
+    # output_dimensionality=768 recorta el vector (Matryoshka Representation
+    # Learning) para mantener el índice tan ligero como con el modelo antiguo.
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",
-        google_api_key=api_key
+        model="models/gemini-embedding-001",
+        google_api_key=api_key,
+        output_dimensionality=768,
     )
     vectorstore = FAISS.from_documents(docs_divididos, embeddings)
     nombres_archivos = [os.path.basename(f) for f in archivos_pdf]
@@ -96,7 +98,7 @@ with st.sidebar:
         st.session_state["autenticado"] = False
         st.rerun()
 
-# 3. Configuración del prompt arbitral
+# Cadena RAG
 system_prompt = (
     "Eres un instructor arbitral experto y riguroso. Tu labor es responder a la duda "
     "basándote exclusivamente en los fragmentos de la normativa y reglamentos oficiales proporcionados.\n\n"
@@ -113,7 +115,6 @@ prompt = ChatPromptTemplate.from_messages([
     ("human", "{question}")
 ])
 
-# 4. Configuración del modelo Gemini (LLM)
 llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash",
     google_api_key=api_key,
@@ -135,7 +136,6 @@ cadena_rag = (
     | StrOutputParser()
 )
 
-# 5. Historial de mensajes en el chat
 if "mensajes" not in st.session_state:
     st.session_state.mensajes = []
 
@@ -143,7 +143,6 @@ for msg in st.session_state.mensajes:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 6. Cuadro de texto para hacer preguntas
 pregunta = st.chat_input("Plantea aquí una jugada o duda reglamentaria...")
 
 if pregunta:
