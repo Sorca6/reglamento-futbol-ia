@@ -4,51 +4,62 @@ import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-try:
-    from langchain.chains import create_retrieval_chain
-    from langchain.chains.combine_documents import create_stuff_documents_chain
-except ImportError:
-    # Compatibilidad para versiones reorganizadas
-    from langchain.chains.retrieval import create_retrieval_chain
-    from langchain.chains.combine_documents.stuff import create_stuff_documents_chain
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
-# Configuración de página
 st.set_page_config(page_title="Asistente Reglamentario", page_icon="⚽", layout="wide")
+
+# --- CONTROL DE ACCESO CON CONTRASEÑA ---
+def verificar_acceso():
+    if st.session_state.get("autenticado", False):
+        return True
+
+    st.title("🔒 Acceso Restringido")
+    st.markdown("Introduce la clave de acceso del equipo arbitral para continuar:")
+    
+    password_input = st.text_input("Contraseña", type="password")
+    clave_correcta = st.secrets.get("APP_PASSWORD", "admin123")
+
+    if st.button("Entrar"):
+        if password_input == clave_correcta:
+            st.session_state["autenticado"] = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta.")
+    
+    return False
+
+if not verificar_acceso():
+    st.stop()
+
+# --- APLICACIÓN PRINCIPAL ---
 st.title("⚽ Asistente Oficial de Normativa y Reglas de Juego")
 st.markdown("Consulta cualquier jugada técnica o disciplinaria basada en los documentos oficiales cargados.")
 
-# 1. Gestión de API Key (Secretos de Streamlit o input en barra lateral)
 api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
 if not api_key:
-    api_key = st.sidebar.text_input("Introduce tu OpenAI API Key:", type="password")
-    if not api_key:
-        st.warning("Introduce tu API Key de OpenAI para activar el asistente.")
-        st.stop()
+    st.error("No se encontró la OPENAI_API_KEY configurada en los Secrets del servidor.")
+    st.stop()
 
-# 2. Carga, troceado e indexación multi-documento con caché
+# Carga e indexación
 @st.cache_resource(show_spinner="Procesando e indexando la documentación oficial...")
 def cargar_vectorstore_multiples_pdfs(carpeta_docs: str):
-    # Buscar todos los archivos .pdf dentro de la carpeta
     archivos_pdf = glob.glob(os.path.join(carpeta_docs, "*.pdf"))
     
     if not archivos_pdf:
         return None, []
     
     todos_los_documentos = []
-    
-    # Leer cada PDF preservando el nombre del archivo de origen
     for ruta_pdf in archivos_pdf:
         loader = PyPDFLoader(ruta_pdf)
         docs = loader.load()
         for doc in docs:
-            # Añadir nombre limpio del archivo a los metadatos
             doc.metadata["fuente_archivo"] = os.path.basename(ruta_pdf)
         todos_los_documentos.extend(docs)
     
-    # Trocear respetando títulos, reglas y párrafos
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=150,
@@ -56,10 +67,8 @@ def cargar_vectorstore_multiples_pdfs(carpeta_docs: str):
     )
     docs_divididos = splitter.split_documents(todos_los_documentos)
     
-    # Crear índice vectorial conjunto
     embeddings = OpenAIEmbeddings(openai_api_key=api_key, model="text-embedding-3-small")
     vectorstore = FAISS.from_documents(docs_divididos, embeddings)
-    
     nombres_archivos = [os.path.basename(f) for f in archivos_pdf]
     return vectorstore, nombres_archivos
 
@@ -67,16 +76,19 @@ CARPETA_DOCUMENTOS = "documentos"
 vectorstore, archivos_cargados = cargar_vectorstore_multiples_pdfs(CARPETA_DOCUMENTOS)
 
 if vectorstore is None:
-    st.error(f"No se encontraron archivos PDF dentro de la carpeta '{CARPETA_DOCUMENTOS}/'. Añade al menos uno.")
+    st.error(f"No se encontraron archivos PDF dentro de la carpeta '{CARPETA_DOCUMENTOS}/'.")
     st.stop()
 
-# Mostrar en la barra lateral qué documentos están activos
 with st.sidebar:
     st.subheader("📚 Documentos cargados")
     for archivo in archivos_cargados:
         st.markdown(f"- `{archivo}`")
+    st.divider()
+    if st.button("Cerrar sesión"):
+        st.session_state["autenticado"] = False
+        st.rerun()
 
-# 3. Configuración del prompt arbitral estricto
+# Configuración del prompt arbitral
 system_prompt = (
     "Eres un instructor arbitral experto y riguroso. Tu labor es responder a la duda "
     "basándote exclusivamente en los fragmentos de la normativa y reglamentos oficiales proporcionados.\n\n"
@@ -90,15 +102,27 @@ system_prompt = (
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
-    ("human", "{input}")
+    ("human", "{question}")
 ])
 
 llm = ChatOpenAI(openai_api_key=api_key, model="gpt-4o-mini", temperature=0.0)
 retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-rag_chain = create_retrieval_chain(retriever, combine_docs_chain)
 
-# 4. Control de mensajes en sesión
+def formatear_documentos(docs):
+    return "\n\n".join(
+        f"[Fuente: {doc.metadata.get('fuente_archivo', 'PDF')} - Pág. {doc.metadata.get('page', 0) + 1}]\n{doc.page_content}"
+        for doc in docs
+    )
+
+# Cadena RAG estándar LCEL (sin paquetes obsoletos)
+cadena_rag = (
+    {"context": retriever | formatear_documentos, "question": RunnablePassthrough()}
+    | prompt
+    | llm
+    | StrOutputParser()
+)
+
+# Historial de mensajes
 if "mensajes" not in st.session_state:
     st.session_state.mensajes = []
 
@@ -106,8 +130,8 @@ for msg in st.session_state.mensajes:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 5. Interfaz de consulta
-pregunta = st.chat_input("Ej: Un jugador en fuera de juego recibe el balón de un despeje intencionado de un defensa, ¿se sanciona?")
+# Consulta
+pregunta = st.chat_input("Plantea aquí una jugada o duda reglamentaria...")
 
 if pregunta:
     st.session_state.mensajes.append({"role": "user", "content": pregunta})
@@ -115,16 +139,18 @@ if pregunta:
         st.markdown(pregunta)
         
     with st.chat_message("assistant"):
-        with st.spinner("Buscando en todos los reglamentos..."):
-            respuesta = rag_chain.invoke({"input": pregunta})
-            texto_respuesta = respuesta["answer"]
+        with st.spinner("Analizando la jugada en la normativa..."):
+            # Obtenemos los fragmentos para mostrarlos en el desplegable
+            docs_relevantes = retriever.invoke(pregunta)
+            # Generamos la respuesta con la cadena LCEL
+            texto_respuesta = cadena_rag.invoke(pregunta)
+            
             st.markdown(texto_respuesta)
             
-            # Desplegable con los fragmentos y páginas exactas de cada documento
-            with st.expander("Ver fuentes consultadas en los PDFs"):
-                for i, doc in enumerate(respuesta["context"]):
+            with st.expander("Ver fragmentos consultados en los PDFs"):
+                for i, doc in enumerate(docs_relevantes):
                     origen = doc.metadata.get("fuente_archivo", "PDF")
-                    pagina = doc.metadata.get("page", 0) + 1  # Base 0 a Base 1
+                    pagina = doc.metadata.get("page", 0) + 1
                     st.markdown(f"**Referencia {i+1} — Archivo:** `{origen}` (Página {pagina})")
                     st.caption(doc.page_content[:300] + "...")
                     st.divider()
