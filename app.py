@@ -38,13 +38,17 @@ if not verificar_acceso():
 st.title("⚽ Asistente Oficial de Normativa y Reglas de Juego (Google Gemini)")
 st.markdown("Consulta cualquier jugada técnica o disciplinaria basada en los documentos oficiales cargados.")
 
-api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+# 1. Obtener la API key de Google
+api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 if not api_key:
-    st.error("No se encontró la GEMINI_API_KEY en los Secrets de Streamlit.")
+    st.error("No se encontró la GOOGLE_API_KEY configurada en los Secrets de Streamlit.")
     st.stop()
 
-# Carga e indexación
+# Inyectarla en las variables de entorno del sistema
+os.environ["GOOGLE_API_KEY"] = api_key
+
+# 2. Carga e indexación de PDFs con embeddings de Google
 @st.cache_resource(show_spinner="Procesando e indexando la documentación con Google Embeddings...")
 def cargar_vectorstore_multiples_pdfs(carpeta_docs: str):
     archivos_pdf = glob.glob(os.path.join(carpeta_docs, "*.pdf"))
@@ -67,9 +71,9 @@ def cargar_vectorstore_multiples_pdfs(carpeta_docs: str):
     )
     docs_divididos = splitter.split_documents(todos_los_documentos)
     
-    # Embeddings oficiales de Google
+    # Modelo universal compatible de Google para embeddings
     embeddings = GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004", 
+        model="models/embedding-001",
         google_api_key=api_key
     )
     vectorstore = FAISS.from_documents(docs_divididos, embeddings)
@@ -92,7 +96,7 @@ with st.sidebar:
         st.session_state["autenticado"] = False
         st.rerun()
 
-# Configuración del prompt
+# 3. Configuración del prompt arbitral
 system_prompt = (
     "Eres un instructor arbitral experto y riguroso. Tu labor es responder a la duda "
     "basándote exclusivamente en los fragmentos de la normativa y reglamentos oficiales proporcionados.\n\n"
@@ -109,11 +113,13 @@ prompt = ChatPromptTemplate.from_messages([
     ("human", "{question}")
 ])
 
+# 4. Configuración del modelo Gemini (LLM)
 llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash",
     google_api_key=api_key,
     temperature=0.0
 )
+
 retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 
 def formatear_documentos(docs):
@@ -129,6 +135,7 @@ cadena_rag = (
     | StrOutputParser()
 )
 
+# 5. Historial de mensajes en el chat
 if "mensajes" not in st.session_state:
     st.session_state.mensajes = []
 
@@ -136,6 +143,7 @@ for msg in st.session_state.mensajes:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+# 6. Cuadro de texto para hacer preguntas
 pregunta = st.chat_input("Plantea aquí una jugada o duda reglamentaria...")
 
 if pregunta:
@@ -144,7 +152,7 @@ if pregunta:
         st.markdown(pregunta)
         
     with st.chat_message("assistant"):
-        with st.spinner("Analizando la jugada en la normativa..."):
+        with st.spinner("Analizando la jugada en la normativa con Gemini..."):
             docs_relevantes = retriever.invoke(pregunta)
             texto_respuesta = cadena_rag.invoke(pregunta)
             st.markdown(texto_respuesta)
